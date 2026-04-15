@@ -24,27 +24,36 @@ def load_and_clean_data():
     df = df[1:].reset_index(drop=True)
     df.columns = [str(c).strip() for c in df.columns]
     
-    # --- PROCESAMIENTO DE FECHAS ---
-    # Convertimos la columna de fecha a formato datetime de Python
+    # --- PROCESAMIENTO DE FECHAS (Sin dependencia de Locale) ---
     if "Fecha de Entrega" in df.columns:
         df["Fecha de Entrega"] = pd.to_datetime(df["Fecha de Entrega"], dayfirst=True, errors='coerce')
-        # Creamos columnas auxiliares para los filtros
-        df["Año"] = df["Fecha de Entrega"].dt.year.fillna(0).astype(int)
-        df["Mes"] = df["Fecha de Entrega"].dt.month_name(locale='es_ES').fillna("Sin Fecha")
-        # Diccionario para ordenar meses correctamente
-        meses_orden = ["January", "February", "March", "April", "May", "June", 
-                       "July", "August", "September", "October", "November", "December"]
         
-    # --- PROCESAMIENTO DE SSI (CORRECCIÓN 79%) ---
+        # Extraemos mes numérico y lo mapeamos a nombre manualmente
+        meses_dict = {
+            1: "Enero", 2: "Febrero", 3: "Marzo", 4: "Abril", 
+            5: "Mayo", 6: "Junio", 7: "Julio", 8: "Agosto", 
+            9: "Septiembre", 10: "Octubre", 11: "Noviembre", 12: "Diciembre"
+        }
+        
+        df["Año"] = df["Fecha de Entrega"].dt.year.fillna(0).astype(int)
+        df["Mes_Num"] = df["Fecha de Entrega"].dt.month.fillna(0).astype(int)
+        df["Mes"] = df["Mes_Num"].map(meses_dict).fillna("Sin Fecha")
+        
+    # --- PROCESAMIENTO DE SSI (Corrección escala 0-100) ---
     if "%SSI" in df.columns:
-        # Quitamos el símbolo % y convertimos a número
+        # Limpieza de caracteres
         df["%SSI_num"] = df["%SSI"].astype(str).str.replace('%', '').str.replace(',', '.')
         df["%SSI_num"] = pd.to_numeric(df["%SSI_num"], errors='coerce')
-        # Si el valor promedio es menor a 1 (ej: 0.85), lo multiplicamos por 100 para que sea 85
-        # Pero si ya es 85, lo dejamos así.
-        # En tu caso, si 7.9% debería ser 79%, multiplicamos por 10.
-        # Optaremos por asegurar que el valor sea base 100:
-        df["%SSI_num"] = df["%SSI_num"].apply(lambda x: x*10 if x < 10 else x)
+        
+        # Lógica de escala: si los datos vienen como 7.9 para representar 79%,
+        # multiplicamos por 10. Si vienen como 0.79, multiplicamos por 100.
+        def corregir_escala(x):
+            if pd.isna(x): return 0.0
+            if x <= 1.0: return x * 100 # Caso 0.85 -> 85%
+            if x < 10.0: return x * 10  # Caso 7.9 -> 79%
+            return x                    # Caso 85.0 -> 85%
+            
+        df["%SSI_num"] = df["%SSI_num"].apply(corregir_escala)
         
     return df
 
@@ -56,11 +65,13 @@ try:
     
     # Filtro de Año
     años_disponibles = sorted([a for a in data_full["Año"].unique() if a != 0], reverse=True)
+    if not años_disponibles: años_disponibles = [0]
     año_sel = st.sidebar.multiselect("Seleccionar Año", options=años_disponibles, default=años_disponibles)
 
-    # Filtro de Mes
-    meses_disponibles = data_full["Mes"].unique().tolist()
-    mes_sel = st.sidebar.multiselect("Seleccionar Mes", options=meses_disponibles, default=meses_disponibles)
+    # Filtro de Mes (Ordenado cronológicamente)
+    df_meses_orden = data_full[["Mes", "Mes_Num"]].drop_duplicates().sort_values("Mes_Num")
+    meses_opciones = df_meses_orden["Mes"].tolist()
+    mes_sel = st.sidebar.multiselect("Seleccionar Mes", options=meses_opciones, default=meses_opciones)
 
     # Filtrado de los datos
     data = data_full[(data_full["Año"].isin(año_sel)) & (data_full["Mes"].isin(mes_sel))]
@@ -69,12 +80,12 @@ try:
     col1, col2, col3, col4 = st.columns(4)
 
     with col1:
-        st.metric("Total Encuestas", len(data))
+        st.metric("Total General", len(data))
 
     with col2:
         if "%SSI_num" in data.columns:
             ssi_actual = data["%SSI_num"].mean()
-            objetivo = 90.0 # Objetivo en base 100
+            objetivo = 90.0
             delta_val = ssi_actual - objetivo
             st.metric(
                 label="Resultado SSI", 
@@ -85,6 +96,7 @@ try:
 
     with col3:
         if "Estado" in data.columns:
+            # Contamos respondidas buscando la palabra clave
             respondidas = len(data[data["Estado"].astype(str).str.contains("Respondida", case=False, na=False)])
             st.metric("Respondidas", respondidas)
 
@@ -102,13 +114,16 @@ try:
         if "Estado" in data.columns:
             fig_pie = px.pie(data, names="Estado", hole=0.4, 
                              color_discrete_sequence=px.colors.qualitative.Pastel)
+            fig_pie.update_layout(showlegend=True)
             st.plotly_chart(fig_pie, use_container_width=True)
 
     with c2:
-        st.subheader("Detalle del Periodo Seleccionado")
-        cols_mostrar = [c for c in data.columns if c not in ["%SSI_num", "Año", "Mes"]]
-        st.dataframe(data[cols_mostrar], height=400)
+        st.subheader("Detalle de Unidades")
+        # Columnas a ocultar del usuario final
+        cols_no = ["%SSI_num", "Año", "Mes", "Mes_Num"]
+        cols_mostrar = [c for c in data.columns if c not in cols_no]
+        st.dataframe(data[cols_mostrar], height=400, use_container_width=True)
 
 except Exception as e:
-    st.error(f"Error en los datos: {e}")
-    st.info("Asegúrate de que la columna 'Fecha de Entrega' tenga un formato de fecha válido.")
+    st.error(f"Error en la aplicación: {e}")
+    st.info("Sugerencia: Revisa que la columna 'Fecha de Entrega' en el Excel tenga formato de fecha (ej. DD/MM/AAAA).")
