@@ -1,58 +1,74 @@
 import streamlit as st
 from streamlit_gsheets import GSheetsConnection
 import pandas as pd
+import plotly.express as px
 
-# Configuración de la página
-st.set_page_config(page_title="Portal Usados Cenoa", layout="wide")
+# Configuración de página
+st.set_page_config(page_title="Tablero SSI Cenoa", layout="wide")
 
-st.title("🚗 Control de Inventario - Usados Cenoa")
-st.markdown("Visualización en tiempo real de unidades disponibles.")
+st.title("📊 Control de Encuestas y SSI")
 
-# URL de tu Google Sheet
-url = "https://docs.google.com/spreadsheets/d/1FkD2pPwIUnCW4ieuEvTPruOtrtjWgH9ellpvezwiRm8/edit#gid=144090567"
+# URL de tu hoja (asegúrate que incluya el gid de la hoja "ENCUESTA 11/25")
+URL = "https://docs.google.com/spreadsheets/d/1FkD2pPwIUnCW4ieuEvTPruOtrtjWgH9ellpvezwiRm8/edit?gid=144090567#gid=144090567"
 
-# Conexión a Google Sheets
 conn = st.connection("gsheets", type=GSheetsConnection)
 
+@st.cache_data(ttl=300)
+def load_and_clean_data():
+    # 1. Leer datos
+    raw_df = conn.read(spreadsheet=URL)
+    
+    # 2. Corregir Encabezados (Usar la fila 0 como nombres de columna)
+    df = raw_df.copy()
+    df.columns = df.iloc[0] # Setea la fila 0 como nombres
+    df = df[1:].reset_index(drop=True) # Elimina la fila 0 de los datos
+    
+    # Limpiar nombres de columnas (quitar espacios o saltos de línea)
+    df.columns = [str(c).strip() for c in df.columns]
+    return df
+
 try:
-    # Lectura de datos (se usa ttl para cachear los datos por 10 min)
-    df = conn.read(spreadsheet=url, ttl="10m")
+    df = load_and_clean_data()
 
-    # --- LIMPIEZA DE DATOS ---
-    # Eliminamos filas vacías si las hay
-    df = df.dropna(how="all")
-
-    # --- FILTROS EN BARRA LATERAL ---
-    st.sidebar.header("Filtros de Búsqueda")
-    
-    # Asumiendo columnas típicas de inventario (ajustar según tus nombres de columna reales)
-    # Si las columnas tienen nombres diferentes, cámbialas aquí:
-    marca_col = "Marca" if "Marca" in df.columns else df.columns[0]
-    modelo_col = "Modelo" if "Modelo" in df.columns else df.columns[1]
-
-    marcas = st.sidebar.multiselect("Seleccione Marca", options=df[marca_col].unique())
-    
-    df_selection = df.copy()
-    if marcas:
-        df_selection = df[df[marca_col].isin(marcas)]
-
-    # --- TABLEROS (Métricas) ---
+    # --- MÉTRICAS PRINCIPALES ---
     col1, col2, col3 = st.columns(3)
-    col1.metric("Total Unidades", len(df_selection))
-    # Ejemplo de métrica de precio si existe la columna 'Precio'
-    if "Precio" in df.columns:
-        precio_avg = df_selection["Precio"].mean()
-        col2.metric("Precio Promedio", f"${precio_avg:,.0f}")
 
-    # --- VISUALIZACIÓN DE DATOS ---
-    st.subheader("Listado de Unidades")
-    st.dataframe(df_selection, use_container_width=True)
+    # Cálculo de SSI (Asumiendo que la columna se llama "%SSI")
+    # Convertimos a numérico por si vienen como texto
+    if "%SSI" in df.columns:
+        ssi_actual = pd.to_numeric(df["%SSI"], errors='coerce').mean()
+        objetivo = 0.90
+        
+        with col1:
+            color = "normal" if ssi_actual >= objetivo else "inverse"
+            st.metric("Resultado SSI", f"{ssi_actual*100:.1f}%", 
+                      delta=f"{(ssi_actual - objetivo)*100:.1f}% vs Objetivo",
+                      delta_color=color)
 
-    # Gráfico simple de stock por marca
-    st.subheader("Distribución por Marca")
-    stock_chart = df_selection[marca_col].value_counts()
-    st.bar_chart(stock_chart)
+    # --- GRÁFICOS ---
+    left_chart, right_chart = st.columns(2)
+
+    with left_chart:
+        st.subheader("Estado de Encuestas")
+        if "Estado" in df.columns:
+            # Gráfico de Torta para Enviadas, Pendientes, Respondidas
+            fig_pie = px.pie(df, names="Estado", hole=0.4,
+                             color_discrete_sequence=px.colors.qualitative.Pastel)
+            st.plotly_chart(fig_pie, use_container_width=True)
+        else:
+            st.warning("No se encontró la columna 'Estado'")
+
+    with right_chart:
+        st.subheader("Detalle del Inventario")
+        st.dataframe(df, height=400)
+
+    # --- FILTRO POR VENDEDOR O SUCURSAL ---
+    st.divider()
+    sucursal = st.multiselect("Filtrar por Sucursal", options=df["Sucursal de entrega"].unique())
+    if sucursal:
+        df_filtered = df[df["Sucursal de entrega"].isin(sucursal)]
+        st.write(df_filtered)
 
 except Exception as e:
-    st.error(f"Error al conectar con la base de datos: {e}")
-    st.info("Asegúrate de que el enlace de Google Sheets sea público o las credenciales estén configuradas.")
+    st.error(f"Error procesando los datos: {e}")
+    st.info("Revisa que los nombres de las columnas en el Excel coincidan exactamente con el código.")
